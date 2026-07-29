@@ -3,7 +3,7 @@ name: presales-timesheet-tracker
 description: >-
   Tracks pre-sales activity hours, manages time entries, and produces weekly Excel timesheet reports. Use this skill whenever the user wants to log time, create a time entry, update hours, check weekly activity, build a timesheet report, query logged hours, or email a weekly report. Trigger phrases: "log hours", "add time entry", "log my time", "update my hours", "timesheet", "weekly report", "how many hours did I log", "log my activity", "pre-sales hours", "time entry for", "what did I log".
 metadata:
-  author: SAP Digital Solution Advisor
+  author: Kishor Hegde
   version: 1.0.0
   tags: timesheet presales time-tracking reporting productivity
 ---
