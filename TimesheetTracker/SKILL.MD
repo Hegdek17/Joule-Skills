@@ -3,8 +3,8 @@ name: presales-timesheet-tracker
 description: >-
   Tracks pre-sales activity hours, manages time entries, and produces weekly Excel timesheet reports. Use this skill whenever the user wants to log time, create a time entry, update hours, check weekly activity, build a timesheet report, query logged hours, or email a weekly report. Trigger phrases: "log hours", "add time entry", "log my time", "update my hours", "timesheet", "weekly report", "how many hours did I log", "log my activity", "pre-sales hours", "time entry for", "what did I log".
 metadata:
-  author: Kishor Hegde
-  version: 1.0.0
+  author: SAP Digital Solution Advisor
+  version: 1.1.0
   tags: timesheet presales time-tracking reporting productivity
 ---
 
@@ -28,10 +28,13 @@ All entries are saved in `presales-log.json` in the working directory. Each entr
   "activity_type": "CF",
   "opportunity_number": "OPP-12345",
   "notes": "Discovery call for S/4HANA migration",
+  "calendar_event_id": null,
   "created_at": "2026-07-28T14:00:00Z",
   "updated_at": "2026-07-28T14:00:00Z"
 }
 ```
+
+`calendar_event_id` is set to the Outlook event ID when the entry is created from a calendar scan. It is `null` for manually-created entries.
 
 If `presales-log.json` does not exist, create it with an empty array `[]` before the first entry.
 
@@ -77,7 +80,7 @@ Handle the response before saving.
 ### Step 5 — Save
 
 Generate the entry ID as: `YYYYMMDD-<lowercase_slug_of_customer>-<unix_timestamp_ms>`.
-Set `day_of_week` from the date (e.g. "Tuesday").
+Set `day_of_week` from the date (e.g. "Tuesday"). Set `calendar_event_id` to `null`.
 Read `presales-log.json`, append the new entry, write it back with `write_file`.
 Confirm: "Logged [X] hours for [customer] on [date] ([CF/NCF])."
 
@@ -124,7 +127,7 @@ Read `presales-log.json` and filter based on the user's request. Common patterns
 Display results as a Markdown table:
 
 | Date | Day | Customer | Hours | Type | Opp. No. | Notes |
-|------|-----|----------|-------|------|----------|-------|
+|------|-----|----------|-------|------|----------|---------|
 
 Footer line: **Total: X.0 hrs | CF: Y.0 hrs | NCF: Z.0 hrs**
 
@@ -208,6 +211,94 @@ Note: Email sending requires Outlook send capability to be available. If email s
 
 ---
 
+## Workflow 6: Calendar Scan & Auto-Log
+
+**Triggered by:** ONLY when the user explicitly asks Joule to scan the calendar. Do NOT trigger automatically. Example phrases: "scan my calendar", "read my calendar for today", "check my Teams calendar this week", "log from my calendar", "what meetings did I have today".
+
+### Step 1 — Determine the scan period
+
+If the user specifies a date or range, use it. If not, ask: "Which date or week should I scan? (e.g. 'today', 'this week', 'last Monday')"
+
+### Step 2 — Fetch calendar events
+
+Call `list_calendar_events` for the requested date range with `limit: 50`.
+
+Filter OUT events that are clearly not pre-sales work:
+- All-day events (public holidays, out-of-office markers)
+- Events with no attendees (personal reminders, blocked time)
+- Events with keywords suggesting internal non-sales activities: "payroll", "labour code", "HR", "Q&A", "townhall" (from non-sales organizers), "birthday", "anniversary", "holiday", "upside tracker", "refresh"
+
+For borderline events, include them and let the user decide.
+
+### Step 3 — Fetch full event details & classify CF / NCF
+
+For each remaining event, call `get_calendar_event` to retrieve the full attendee list.
+
+Apply this classification rule:
+- **CF (Customer Facing)**: at least 1 attendee has a **non-@sap.com** email address
+- **NCF (Non-Customer Facing)**: ALL attendees have **@sap.com** email addresses
+- **Unknown**: attendee list is empty, private, or unavailable → flag for user confirmation
+
+IMPORTANT: Make all `get_calendar_event` calls in a **single message as parallel tool calls** — they have no dependencies on each other. This avoids fetching events one at a time.
+
+### Step 4 — Calculate hours
+
+Calculate each event's duration in hours from start and end times. Round to the nearest 0.5:
+- Less than 15 min → 0.5h (minimum loggable unit)
+- 15–44 min → 0.5h
+- 45–74 min → 1.0h
+- 75–104 min → 1.5h
+- And so on (round to nearest 0.5)
+
+### Step 5 — Identify the customer name
+
+For each event, attempt to identify the customer name:
+1. Parse the event title for company/customer names (e.g. "Abbott X SAP" → "Abbott", "Prep for Siemens call" → "Siemens")
+2. Check external attendee email domains (e.g. someone@abbott.com → "Abbott")
+3. Cross-reference against existing customer names in `presales-log.json` using fuzzy matching
+
+If the customer name is clear → pre-fill it.
+If the name is ambiguous or not identifiable → flag as "Customer: ?" and ask the user after presenting the table.
+For NCF events → leave customer name as the event title or blank.
+
+### Step 6 — Look up previous opportunity ID
+
+For each entry where a customer name is identified:
+1. Search `presales-log.json` for the most recent entry for that customer that has a non-blank `opportunity_number`.
+2. If found → pre-fill and note: "Using previous Opp ID [OPP-ID] for [customer]. Confirm or change?"
+3. If not found → ask: "Do you have an opportunity number for [customer]? (say 'skip' to leave blank)"
+
+### Step 7 — Present suggested entries for confirmation
+
+Present all identified entries in a summary table before saving anything:
+
+| # | Date | Event | Hours | Type | Customer | Opp. No. |
+|---|------|-------|-------|------|----------|----------|
+
+Below the table, list any items flagged as Unknown type or missing customer name, and ask for those specifically.
+
+Then say:
+> "Found [N] possible entries from your calendar. Tell me which to log — e.g. 'log all', 'log 1, 2, 4', or 'skip 3'. You can also correct any field: 'change #2 customer to Deloitte'."
+
+Also ask for notes in bulk: "Any notes to add to any of these entries? (e.g. '#2 demo prep, #4 partner review session')"
+
+### Step 8 — Deduplication check before saving
+
+Before saving each confirmed entry, perform TWO checks:
+
+1. **Calendar event ID check**: Search `presales-log.json` for any entry where `calendar_event_id` matches this event's ID. If found → skip silently and note: "'[event title]' was already logged — skipped."
+2. **Customer + date duplicate check**: Run the standard check from Workflow 1, Step 4.
+
+### Step 9 — Save and notify
+
+Save each confirmed entry with `calendar_event_id` set to the event's Outlook event ID.
+
+After all entries are saved, display a confirmation summary and always add this notice:
+
+> "These entries cover the meeting duration only. If you did any preparation or follow-up work for any of these meetings, log those separately — just ask me to add them."
+
+---
+
 ## Customer Name Matching
 
 Apply this logic every time a customer name is entered or searched.
@@ -240,13 +331,13 @@ No existing customer found. Proceed with the name as entered. It becomes the new
 - **Date**: Valid calendar date. Future dates and weekends are allowed.
 - **Activity type**: Must resolve to "CF" or "NCF". Aliases: "Customer Facing" = CF, "Non-Customer Facing" = NCF.
 - **Out-of-week edits**: Warn before allowing changes to entries from previous weeks.
-- **Duplicate entries**: Always check before saving a new entry for the same customer + date.
+- **Duplicate entries**: Always check by `calendar_event_id` first (for calendar-sourced entries), then by customer name + date.
 
 ---
 
 ## Notes for Future Enhancements
 
 - **Multi-day entry**: Allow logging the same activity across multiple days in one go.
-- **Calendar scan**: Scan Outlook calendar for the week and suggest entries based on meetings.
 - **Direct Melody integration**: When an MCP connector for Melody (SAP BTP Launchpad) is available, post entries directly instead of exporting to Excel.
 - **Scheduled reminders**: When an MCP Scheduler connector is available, set up automated daily reminders at 3:30 PM and a Friday 4:00 PM report email.
+- **Interactive confirmation UI**: When Joule Work Desktop supports clickable card actions, replace the text-based confirmation flow in Workflow 6 with per-entry confirm/skip buttons.
